@@ -22,6 +22,7 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
         return text
     api_key = os.getenv("DEEPL_API_KEY", "").strip()
     if not api_key:
+        logger.warning("未配置 DEEPL_API_KEY，跳过翻译")
         return text
     base = (
         "https://api-free.deepl.com/v2/translate"
@@ -37,16 +38,18 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
         try:
             resp = requests.post(base, headers=headers, json=payload, timeout=15)
             if resp.status_code in (403, 456):
-                logger.error(f"DeepL HTTP {resp.status_code}")
+                logger.error(f"DeepL 返回 HTTP {resp.status_code}")
                 return text
             resp.raise_for_status()
             data = resp.json()
             tr = (data.get("translations") or [{}])[0].get("text", "").strip()
             if tr and tr != text.strip():
+                logger.info(f"翻译完成: {tr[:60]}...")
                 return tr
         except Exception as e:
-            logger.warning(f"DeepL 第 {attempt} 次失败: {e}")
+            logger.warning(f"DeepL 第 {attempt} 次尝试失败: {e}")
             time.sleep(2 ** attempt)
+    logger.warning("翻译失败，保留原文")
     return text
 
 
@@ -58,14 +61,5 @@ def process_tweet(raw_text, max_length=900, translate=True):
         text = translate_to_chinese(text)
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
-    return text
-
-
-def process_tweet_as_is(raw_text, max_length=900):
-    """分发阶段：不翻译、不去链接（主号内容原样）。"""
-    text = (raw_text or "").strip()
-    text = re.sub(r"[^\S\n]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if len(text) > max_length:
-        text = text[: max_length - 3].rstrip() + "..."
+        logger.warning("正文超长，已截断")
     return text
