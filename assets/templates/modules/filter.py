@@ -3,20 +3,43 @@ from modules import db
 from modules.processor import process_tweet
 from loguru import logger
 
+# —— 个人引流链接 ——
 PERSONAL_LINK_PATTERNS = [
-    r"(?i)t\.me/", r"(?i)telegram\.me/", r"(?i)discord\.gg/",
-    r"(?i)youtube\.com/", r"(?i)youtu\.be/", r"(?i)instagram\.com/",
-    r"(?i)tiktok\.com/", r"(?i)linktr\.ee/", r"(?i)bit\.ly/",
+    r"(?i)t\.me/",
+    r"(?i)telegram\.me/",
+    r"(?i)discord\.gg/",
+    r"(?i)discord\.com/invite",
+    r"(?i)youtube\.com/",
+    r"(?i)youtu\.be/",
+    r"(?i)instagram\.com/",
+    r"(?i)tiktok\.com/",
+    r"(?i)onlyfans\.com/",
+    r"(?i)linktr\.ee/",
+    r"(?i)bio\.link/",
+    r"(?i)carrd\.co/",
+    r"(?i)bit\.ly/",
+    r"(?i)tinyurl\.com/",
 ]
+
+# —— 推广话术 ——
 PROMO_KEYWORDS = [
-    "follow me", "giveaway", "airdrop", "dm me", "join my",
-    "link in bio", "subscribe",
+    "follow me", "follow for", "subscribe", "giveaway", "airdrop",
+    "dm me", "join my", "my channel", "my group", "my community",
+    "click the link", "link in bio", "check my", "retweet and",
+    "like and rt", "tag your friends",
 ]
-OFFTOPIC_KEYWORDS = ["happy birthday", "celebrating my", "wedding", "vacation"]
+
+# —— 明显非行情 ——
+OFFTOPIC_KEYWORDS = [
+    "happy birthday", "celebrating my", "enjoying life",
+    "wedding", "vacation", "holiday",
+]
 
 
 def has_personal_link(text: str) -> bool:
-    return any(re.search(p, text or "") for p in PERSONAL_LINK_PATTERNS)
+    if not text:
+        return False
+    return any(re.search(p, text) for p in PERSONAL_LINK_PATTERNS)
 
 
 def has_promo_or_offtopic(text: str) -> bool:
@@ -36,11 +59,12 @@ def get_media_types(tweet):
 def get_image_urls(tweet, max_images=4):
     urls, seen = [], set()
     legacy = tweet.get("legacy", {})
-    sources = []
     if legacy.get("extended_entities"):
         sources = [legacy["extended_entities"]]
     elif legacy.get("entities"):
         sources = [legacy["entities"]]
+    else:
+        sources = []
     for source in sources:
         for m in source.get("media") or []:
             if m.get("type") != "photo":
@@ -67,10 +91,17 @@ def get_tweet_text(tweet):
 
 
 def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=True):
+    """
+    过滤链：
+    F-00 去重 | F-01 视频 | F-02 转推 | F-03 回复他人 | F-04 串帖
+    F-05 纯图 | F-06 空内容 | F-07 引流链接 | F-08 推广/非行情
+    strict_promo=False 时跳过 F-07/F-08（用于主号分发）
+    """
     tweet_id = tweet.get("rest_id", "") or tweet.get("id_str", "")
     legacy = tweet.get("legacy", {})
     raw_text = get_tweet_text(tweet)
     media_types = get_media_types(tweet)
+
     tweet_data = {
         "tweet_id": tweet_id,
         "content_raw": raw_text,
@@ -81,31 +112,48 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
     }
 
     if db.tweet_exists(tweet_id):
+        logger.debug(f"F-00 去重跳过: {tweet_id}")
         return False, "dedup", tweet_data
+
     if "video" in media_types or "animated_gif" in media_types:
+        logger.debug(f"F-01 跳过视频/GIF: {tweet_id}")
         return False, "drop_video", tweet_data
+
     if legacy.get("retweeted_status_result") or raw_text.startswith("RT @"):
         tweet_data["tweet_type"] = "retweet"
+        logger.debug(f"F-02 跳过转推: {tweet_id}")
         return False, "drop_rt", tweet_data
+
     reply_to_user = legacy.get("in_reply_to_user_id_str", "")
     if reply_to_user and reply_to_user != target_user_id:
+        tweet_data["tweet_type"] = "reply"
+        logger.debug(f"F-03 跳过回复他人: {tweet_id}")
         return False, "drop_reply", tweet_data
+
     if reply_to_user == target_user_id:
+        tweet_data["tweet_type"] = "thread_continuation"
+        logger.debug(f"F-04 跳过串帖续贴: {tweet_id}")
         return False, "drop_thread", tweet_data
 
     clean_text = process_tweet(raw_text, max_length=max_content_length)
     if "photo" in media_types and not clean_text.strip():
+        logger.debug(f"F-05 跳过纯图无文字: {tweet_id}")
         return False, "drop_image_only", tweet_data
     if not clean_text.strip():
+        logger.debug(f"F-06 跳过空内容: {tweet_id}")
         return False, "drop_empty", tweet_data
 
     if strict_promo:
+        # 必须用原文判断链接（process 可能去掉 URL）
         if has_personal_link(raw_text):
+            logger.info(f"F-07 跳过引流链接: {tweet_id}")
             return False, "drop_personal_link", tweet_data
         if has_promo_or_offtopic(raw_text) or has_promo_or_offtopic(clean_text):
+            logger.info(f"F-08 跳过推广/非行情: {tweet_id}")
             return False, "drop_offtopic", tweet_data
 
     tweet_data["content_clean"] = clean_text
     tweet_data["filter_result"] = "pass"
     tweet_data["status"] = "pending"
+    logger.info(f"推文 {tweet_id} 通过过滤: {clean_text[:80]}...")
     return True, "pass", tweet_data
