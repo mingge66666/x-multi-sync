@@ -146,14 +146,16 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         if has_promo_or_offtopic(raw_text) or has_promo_or_offtopic(clean_text):
             logger.info(f"F-08 跳过推广/非行情: {tweet_id}")
             return False, "drop_offtopic", tweet_data
-    else:
-        # 主号分发：与 X 原文一致
-        clean_text = (raw_text or "").strip()
-        if len(clean_text) > max_content_length:
-            clean_text = clean_text[: max_content_length - 3] + "..."
-        if not clean_text.strip() and "photo" not in media_types:
-            logger.debug(f"F-06 跳过空内容: {tweet_id}")
-            return False, "drop_empty", tweet_data
+else:
+    # 主号分发：去掉推文末尾的 t.co 媒体链接，其它尽量与 X 一致
+    clean_text = re.sub(r"https?://\S+", "", raw_text or "")
+    clean_text = re.sub(r"[^\S\n]+", " ", clean_text)
+    clean_text = re.sub(r"\n{3,}", "\n\n", clean_text).strip()
+    if len(clean_text) > max_content_length:
+        clean_text = clean_text[: max_content_length - 3] + "..."
+    if not clean_text.strip() and "photo" not in media_types:
+        logger.debug(f"F-06 跳过空内容: {tweet_id}")
+        return False, "drop_empty", tweet_data
 
     tweet_data["content_clean"] = clean_text
     tweet_data["filter_result"] = "pass"
