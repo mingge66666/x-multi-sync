@@ -1,18 +1,26 @@
+accounts_file: "./accounts.txt"
+monitor_accounts: []
+
 twitter:
-  username: "{{TWITTER_USERNAME}}"
-  profile_url: "https://x.com/{{TWITTER_USERNAME}}"
+  # 抓取 Cookie 来自浏览号 @lukt0301（文件本身，不必写用户名）
   cookies_path: "./cookies/twitter.json"
+
+my_x:
+  username: "minggebtc"
+  cookies_path: "./cookies/my_x.json"
+  profile_url: "https://x.com/minggebtc"
 
 binance_square:
   api_endpoint: "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
-  inter_request_delay_seconds: 10
+  inter_request_delay_seconds: 15
   max_content_length: 900
 
 scheduler:
-  interval_minutes: 60
-  jitter_minutes: 5
+  interval_minutes: 20
+  jitter_minutes: 3
   daily_digest_hour_utc8: 21
   midnight_reset_hour_utc8: 0
+  per_account_delay_seconds: 20
 
 limits:
   max_retries: 3
