@@ -1,1 +1,5 @@
-
+# 监控账号列表：每行一个，不要加 @
+# 修改本文件后重启容器即可
+Cryptobullmaker
+CryptoBullet1
+CryptoFaibik
