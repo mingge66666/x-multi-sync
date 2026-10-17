@@ -20,6 +20,7 @@ scheduler:
   daily_digest_hour_utc8: 21
   midnight_reset_hour_utc8: 0
   per_account_delay_seconds: 20
+  max_tweet_age_hours: 1 
 
 limits:
   max_retries: 3
