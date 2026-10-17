@@ -2,7 +2,6 @@ accounts_file: "./accounts.txt"
 monitor_accounts: []
 
 twitter:
-  # 抓取 Cookie 来自浏览号 @lukt0301（文件本身，不必写用户名）
   cookies_path: "./cookies/twitter.json"
 
 my_x:
