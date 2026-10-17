@@ -3,7 +3,6 @@ from modules import db
 from modules.processor import process_tweet
 from loguru import logger
 
-# —— 个人引流链接 ——
 PERSONAL_LINK_PATTERNS = [
     r"(?i)t\.me/",
     r"(?i)telegram\.me/",
@@ -21,7 +20,6 @@ PERSONAL_LINK_PATTERNS = [
     r"(?i)tinyurl\.com/",
 ]
 
-# —— 推广话术 ——
 PROMO_KEYWORDS = [
     "follow me", "follow for", "subscribe", "giveaway", "airdrop",
     "dm me", "join my", "my channel", "my group", "my community",
@@ -29,7 +27,6 @@ PROMO_KEYWORDS = [
     "like and rt", "tag your friends",
 ]
 
-# —— 明显非行情 ——
 OFFTOPIC_KEYWORDS = [
     "happy birthday", "celebrating my", "enjoying life",
     "wedding", "vacation", "holiday",
@@ -92,10 +89,9 @@ def get_tweet_text(tweet):
 
 def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=True):
     """
-    过滤链：
-    F-00 去重 | F-01 视频 | F-02 转推 | F-03 回复他人 | F-04 串帖
-    F-05 纯图 | F-06 空内容 | F-07 引流链接 | F-08 推广/非行情
-    strict_promo=False 时跳过 F-07/F-08（用于主号分发）
+    F-00 去重 | F-01 视频 | F-02 转推 | F-03 回复 | F-04 串帖
+    F-05 纯图 | F-06 空内容 | F-07 引流 | F-08 非行情
+    strict_promo=False：主号分发，正文保持与 X 一致，不做引流过滤、不翻译。
     """
     tweet_id = tweet.get("rest_id", "") or tweet.get("id_str", "")
     legacy = tweet.get("legacy", {})
@@ -135,22 +131,29 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         logger.debug(f"F-04 跳过串帖续贴: {tweet_id}")
         return False, "drop_thread", tweet_data
 
-    clean_text = process_tweet(raw_text, max_length=max_content_length)
-    if "photo" in media_types and not clean_text.strip():
-        logger.debug(f"F-05 跳过纯图无文字: {tweet_id}")
-        return False, "drop_image_only", tweet_data
-    if not clean_text.strip():
-        logger.debug(f"F-06 跳过空内容: {tweet_id}")
-        return False, "drop_empty", tweet_data
-
     if strict_promo:
-        # 必须用原文判断链接（process 可能去掉 URL）
+        # 采集阶段：翻译+清理，并过滤引流/非行情
+        clean_text = process_tweet(raw_text, max_length=max_content_length)
+        if "photo" in media_types and not clean_text.strip():
+            logger.debug(f"F-05 跳过纯图无文字: {tweet_id}")
+            return False, "drop_image_only", tweet_data
+        if not clean_text.strip():
+            logger.debug(f"F-06 跳过空内容: {tweet_id}")
+            return False, "drop_empty", tweet_data
         if has_personal_link(raw_text):
             logger.info(f"F-07 跳过引流链接: {tweet_id}")
             return False, "drop_personal_link", tweet_data
         if has_promo_or_offtopic(raw_text) or has_promo_or_offtopic(clean_text):
             logger.info(f"F-08 跳过推广/非行情: {tweet_id}")
             return False, "drop_offtopic", tweet_data
+    else:
+        # 主号分发：与 X 原文一致
+        clean_text = (raw_text or "").strip()
+        if len(clean_text) > max_content_length:
+            clean_text = clean_text[: max_content_length - 3] + "..."
+        if not clean_text.strip() and "photo" not in media_types:
+            logger.debug(f"F-06 跳过空内容: {tweet_id}")
+            return False, "drop_empty", tweet_data
 
     tweet_data["content_clean"] = clean_text
     tweet_data["filter_result"] = "pass"
