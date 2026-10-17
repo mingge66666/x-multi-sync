@@ -132,13 +132,20 @@ def check_auth_error(data):
     return False, ""
 
 
-async def fetch_tweets(config):
+async def fetch_tweets(config, username=None, cookies_path=None, profile_url=None):
     """
-    Fetch tweets from Twitter using Playwright XHR interception.
-    Returns list of raw tweet result objects.
+    username: 监控账号用户名（可选）
+    cookies_path / profile_url: 可覆盖 config
     """
-    cookies_path = config["twitter"]["cookies_path"]
-    profile_url = config["twitter"]["profile_url"]
+    cookies_path = cookies_path or config.get("twitter", {}).get("cookies_path", "./cookies/twitter.json")
+    if profile_url:
+        pass
+    elif username:
+        profile_url = f"https://x.com/{username.lstrip('@')}"
+    else:
+        profile_url = config.get("twitter", {}).get("profile_url") or config.get("my_x", {}).get("profile_url")
+    if not profile_url:
+        return [], "未配置 profile_url 或 username"
 
     captured_responses = []
     auth_error = None
