@@ -37,10 +37,29 @@ def cursor_key(name: str) -> str:
     return f"last_tweet_id:{name}"
 
 
+def is_within_hours(tweet, hours=1.0) -> bool:
+    """推文是否在最近 hours 小时内发布。"""
+    created_at = tweet.get("legacy", {}).get("created_at", "")
+    if not created_at:
+        return False
+    try:
+        dt = datetime.strptime(created_at, "%a %b %d %H:%M:%S %z %Y")
+        age = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+        return age <= timedelta(hours=float(hours))
+    except ValueError:
+        return False
+
+
+def max_age_hours(config) -> float:
+    return float(config.get("scheduler", {}).get("max_tweet_age_hours", 1))
+
+
 async def collect_from_account(config, username: str, stats: dict):
+    """从单个监控号采集：过滤 → 中文 → 发到自己的 X。"""
     logger.info(f"—— 开始采集监控号 @{username} ——")
     last_id = db.get_sync_state(cursor_key(username))
     raw, auth_error = await fetcher.fetch_tweets(config, username=username)
+    hours = max_age_hours(config)
 
     if auth_error:
         notifier.send_alert(
@@ -57,7 +76,6 @@ async def collect_from_account(config, username: str, stats: dict):
 
     target_uid = get_target_user_id(raw) or ""
     highest = last_id
-    today = datetime.now(UTC8).strftime("%Y-%m-%d")
     batch = []
 
     for tweet in raw:
@@ -66,15 +84,9 @@ async def collect_from_account(config, username: str, stats: dict):
             continue
         if last_id and int(tid) <= int(last_id):
             continue
-        if not last_id:
-            created = tweet.get("legacy", {}).get("created_at", "")
-            if created:
-                try:
-                    dt = datetime.strptime(created, "%a %b %d %H:%M:%S %z %Y")
-                    if dt.astimezone(UTC8).strftime("%Y-%m-%d") != today:
-                        continue
-                except ValueError:
-                    pass
+        # 只处理最近 N 小时内的推文
+        if not is_within_hours(tweet, hours=hours):
+            continue
         if not highest or int(tid) > int(highest):
             highest = tid
 
@@ -124,16 +136,18 @@ async def collect_from_account(config, username: str, stats: dict):
 
 
 async def distribute_from_my_x(config, stats: dict):
+    """从自己的 X 原样同步到币安广场 + Telegram（仅原创、近 N 小时）。"""
     my = config.get("my_x") or {}
     username = (my.get("username") or "").lstrip("@")
     if not username:
         logger.warning("未配置 my_x.username，跳过广场/频道分发")
         return
 
-    logger.info(f"—— 开始分发主号 @{username} 到币安广场与公开频道 ——")
+    logger.info(f"—— 开始分发主号 @{username} ——")
     halt = db.get_sync_state("halt_publishing_today") == "1"
     last_id = db.get_sync_state(cursor_key(f"hub:{username}"))
     cookies = my.get("cookies_path", "./cookies/my_x.json")
+    hours = max_age_hours(config)
 
     raw, auth_error = await fetcher.fetch_tweets(
         config,
@@ -160,9 +174,11 @@ async def distribute_from_my_x(config, stats: dict):
             continue
         if last_id and int(tid) <= int(last_id):
             continue
+        if not is_within_hours(tweet, hours=hours):
+            continue
         if not highest or int(tid) > int(highest):
             highest = tid
-        # 主号：只要原创，不再做引流过滤
+
         ok, result, data = tweet_filter.filter_tweet(
             tweet, target_uid, max_content_length=max_len, strict_promo=False
         )
@@ -173,6 +189,7 @@ async def distribute_from_my_x(config, stats: dict):
         batch.append(data)
 
     batch.sort(key=lambda x: int(x["tweet_id"]))
+
     if halt:
         logger.info("今日币安发帖已暂停，仅更新游标")
         if highest:
@@ -184,8 +201,13 @@ async def distribute_from_my_x(config, stats: dict):
 
     for data in batch:
         db.save_tweet(data)
+        # 与 X 一致的正文（主号阶段 filter 已用原文）
+        text_x = data.get("content_clean") or data.get("content_raw") or ""
+        # 币安常把 $TICKER 展开成合约；用全角 ＄ 尽量贴近展示
+        text_square = text_x.replace("$", "＄")
+
         success, result = await publisher.publish_to_square(
-            data["content_clean"],
+            text_square,
             api,
             delay,
             image_urls=data.get("image_urls") or [],
@@ -200,9 +222,11 @@ async def distribute_from_my_x(config, stats: dict):
             )
             stats["distributed"] = stats.get("distributed", 0) + 1
             try:
+                # Telegram：与 X 相同正文，不附币安链接，带图
                 await telegram_sync.send_sync_post(
-                    data["content_clean"],
-                    result.get("square_post_url", ""),
+                    text_x,
+                    square_url="",
+                    image_urls=data.get("image_urls") or [],
                 )
             except Exception as e:
                 logger.warning(f"同步公开频道失败: {e}")
@@ -261,7 +285,8 @@ async def sync_cycle(config):
             "WARNING",
         )
     else:
-        logger.info(f"当前监控账号：{', '.join('@'+a for a in accounts)}")
+        logger.info(f"当前监控账号：{', '.join('@' + a for a in accounts)}")
+        logger.info(f"仅处理最近 {max_age_hours(config)} 小时内的推文")
         delay = int(config.get("scheduler", {}).get("per_account_delay_seconds", 20))
         for i, user in enumerate(accounts):
             try:
