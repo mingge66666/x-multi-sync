@@ -5,7 +5,6 @@ from pathlib import Path
 import aiohttp
 from playwright.async_api import async_playwright
 from loguru import logger
-
 from modules.x_rate_limit import acquire_x_post_slot
 
 
@@ -62,15 +61,16 @@ async def _download_images(urls, max_n=4):
 
 
 async def post_to_x(text: str, cookies_path: str, image_urls=None) -> bool:
+    """发布到自己的 X（中文正文 + 可选图片）。"""
     if not text or not str(text).strip():
         return False
     if not Path(cookies_path).exists():
-        logger.warning(f"未找到发帖 Cookie: {cookies_path}")
+        logger.warning(f"未找到发帖 Cookie 文件: {cookies_path}")
         return False
 
     ok, reason = acquire_x_post_slot()
     if not ok:
-        logger.warning(f"跳过发 X: {reason}")
+        logger.warning(f"跳过发布到 X：{reason}")
         return False
 
     t = str(text).strip()
@@ -125,10 +125,10 @@ async def post_to_x(text: str, cookies_path: str, image_urls=None) -> bool:
             ).first
             await btn.click()
             await asyncio.sleep(6)
-            logger.info("已发到自己的 X")
+            logger.info("已成功发布到自己的 X 账号")
             return True
         except Exception as e:
-            logger.error(f"发到自己的 X 失败: {e}")
+            logger.error(f"发布到自己的 X 失败: {e}")
             return False
         finally:
             await browser.close()
