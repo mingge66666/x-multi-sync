@@ -1,6 +1,6 @@
 import re
 from modules import db
-from modules.processor import process_tweet, clean_for_distribute
+from modules.processor import process_tweet, clean_for_distribute, protect_cashtags_for_square
 from loguru import logger
 
 PERSONAL_LINK_PATTERNS = [
@@ -83,7 +83,6 @@ def get_image_urls(tweet, max_images=4):
 
 
 def _remove_entity_urls(text: str, tweet) -> str:
-    """按 entities 删除 full_text 中的 t.co / 媒体占位 / 外链。"""
     if not text:
         return ""
     legacy = tweet.get("legacy", {}) or {}
@@ -116,9 +115,9 @@ def get_tweet_text(tweet):
 
 def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=True):
     """
-    strict_promo=True  采集：翻译+过滤引流 + 去链 + 保护 cashtag
-    strict_promo=False 分发：不翻译，去 t.co，content_clean 供 TG；
-                       另存 content_square 供广场（带 ＄ 保护）
+    strict_promo=True  采集 → content_clean 发 X（保留 $TOKEN）
+                      content_square 备用（＄TOKEN）
+    strict_promo=False 分发 → content_clean 给 TG；content_square 给广场
     """
     tweet_id = tweet.get("rest_id", "") or tweet.get("id_str", "")
     legacy = tweet.get("legacy", {})
@@ -159,8 +158,12 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         return False, "drop_thread", tweet_data
 
     if strict_promo:
+        # 发 X：保留 $TOKEN
         clean_text = process_tweet(
-            raw_text, max_length=max_content_length, translate=True, for_square=True
+            raw_text,
+            max_length=max_content_length,
+            translate=True,
+            for_square=False,
         )
         if "photo" in media_types and not clean_text.strip():
             logger.debug(f"F-05 跳过纯图无文字: {tweet_id}")
@@ -174,10 +177,10 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         if has_promo_or_offtopic(raw_text) or has_promo_or_offtopic(clean_text):
             logger.info(f"F-08 跳过推广/非行情: {tweet_id}")
             return False, "drop_offtopic", tweet_data
+
         tweet_data["content_clean"] = clean_text
-        tweet_data["content_square"] = clean_text
+        tweet_data["content_square"] = protect_cashtags_for_square(clean_text)
     else:
-        # 分发：去链接；TG 用无 ＄ 也可，广场必须保护 cashtag
         text_tg = clean_for_distribute(raw_text, max_length=max_content_length, for_square=False)
         text_sq = clean_for_distribute(raw_text, max_length=max_content_length, for_square=True)
         if not text_tg.strip() and "photo" not in media_types:
