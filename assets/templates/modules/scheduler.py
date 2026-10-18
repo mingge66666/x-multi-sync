@@ -84,7 +84,6 @@ async def collect_from_account(config, username: str, stats: dict):
             continue
         if last_id and int(tid) <= int(last_id):
             continue
-        # 只处理最近 N 小时内的推文
         if not is_within_hours(tweet, hours=hours):
             continue
         if not highest or int(tid) > int(highest):
@@ -136,7 +135,7 @@ async def collect_from_account(config, username: str, stats: dict):
 
 
 async def distribute_from_my_x(config, stats: dict):
-    """从自己的 X 原样同步到币安广场 + Telegram（仅原创、近 N 小时）。"""
+    """从自己的 X 同步到币安广场 + Telegram（仅原创、近 N 小时）。"""
     my = config.get("my_x") or {}
     username = (my.get("username") or "").lstrip("@")
     if not username:
@@ -201,10 +200,10 @@ async def distribute_from_my_x(config, stats: dict):
 
     for data in batch:
         db.save_tweet(data)
-        # 与 X 一致的正文（主号阶段 filter 已用原文）
-        text_x = data.get("content_clean") or data.get("content_raw") or ""
-        # 币安常把 $TICKER 展开成合约；用全角 ＄ 尽量贴近展示
-        text_square = text_x.replace("$", "＄")
+
+        # TG：去链接后的正文；广场：去链接 + ＄ 保护 cashtag
+        text_tg = data.get("content_clean") or data.get("content_raw") or ""
+        text_square = data.get("content_square") or text_tg.replace("$", "＄")
 
         success, result = await publisher.publish_to_square(
             text_square,
@@ -222,9 +221,8 @@ async def distribute_from_my_x(config, stats: dict):
             )
             stats["distributed"] = stats.get("distributed", 0) + 1
             try:
-                # Telegram：与 X 相同正文，不附币安链接，带图
                 await telegram_sync.send_sync_post(
-                    text_x,
+                    text_tg,
                     square_url="",
                     image_urls=data.get("image_urls") or [],
                 )
