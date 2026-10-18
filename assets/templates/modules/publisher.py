@@ -1,273 +1,145 @@
-import os
-import time
+import json
 import asyncio
-import mimetypes
+import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
-
 import aiohttp
+from playwright.async_api import async_playwright
 from loguru import logger
-
-def _get_api_key():
-    key = os.getenv("BINANCE_SQUARE_API_KEY", "")
-    if not key:
-        raise RuntimeError("BINANCE_SQUARE_API_KEY is not set")
-    return key
-
-API_V1 = "https://www.binance.com/bapi/composite/v1/public/pgc/openApi"
-API_V2 = "https://www.binance.com/bapi/composite/v2/public/pgc/openApi"
-TMP_DIR = Path("./tmp/images")
-MAX_IMAGES = 4
+from modules.x_rate_limit import acquire_x_post_slot
 
 
-def _headers_json():
-    return {
-        "X-Square-OpenAPI-Key": _get_api_key(),
-        "Content-Type": "application/json",
-        "clienttype": "binanceSkill",
-    }
+def load_cookies(path: str):
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    out = []
+    for c in raw:
+        item = {
+            "name": c["name"],
+            "value": c["value"],
+            "domain": c.get("domain", ".x.com"),
+            "path": c.get("path", "/"),
+        }
+        if c.get("expirationDate"):
+            item["expires"] = c["expirationDate"]
+        if c.get("httpOnly"):
+            item["httpOnly"] = True
+        if c.get("secure"):
+            item["secure"] = True
+        ss = (c.get("sameSite") or "").lower()
+        if ss in ("no_restriction", "none"):
+            item["sameSite"] = "None"
+        elif ss == "lax":
+            item["sameSite"] = "Lax"
+        elif ss == "strict":
+            item["sameSite"] = "Strict"
+        out.append(item)
+    return out
 
 
-async def _api_post(session, base, path, body):
-    async with session.post(
-        f"{base}{path}",
-        headers=_headers_json(),
-        json=body,
-        timeout=aiohttp.ClientTimeout(total=30),
-    ) as resp:
-        return await resp.json()
-
-
-async def upload_tweet_images(image_urls: list) -> list:
-    """
-    下载推特图片 → 上传币安 → 返回 imageList（币安 imageUrl 列表）
-    失败的单张会跳过；全部失败则返回 []，仍可发纯文字。
-    """
-    if not image_urls:
-        return []
-
-    TMP_DIR.mkdir(parents=True, exist_ok=True)
-    result = []
-
+async def _download_images(urls, max_n=4):
+    paths = []
+    if not urls:
+        return paths
+    tmp = Path(tempfile.mkdtemp(prefix="ximg_"))
     async with aiohttp.ClientSession() as session:
-        for i, url in enumerate(image_urls[:MAX_IMAGES]):
-            ext = Path(urlparse(url).path).suffix.lower() or ".jpg"
-            if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-                ext = ".jpg"
-            local = TMP_DIR / f"tw_{int(time.time())}_{i}{ext}"
-
-            # 1) 下载
+        for i, url in enumerate(urls[:max_n]):
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as r:
                     if r.status != 200:
-                        logger.warning(f"Download image HTTP {r.status}: {url}")
                         continue
-                    local.write_bytes(await r.read())
+                    u = url.lower().split("?")[0]
+                    ext = ".png" if u.endswith(".png") else ".jpg"
+                    if ".webp" in u:
+                        ext = ".webp"
+                    p = tmp / f"img_{i}{ext}"
+                    p.write_bytes(await r.read())
+                    paths.append(str(p))
             except Exception as e:
-                logger.warning(f"Download image error: {e}")
-                continue
-
-            # 2) 获取预签名
-            data = await _api_post(
-                session, API_V2, "/image/presignedUrl", {"imageName": local.name}
-            )
-            if data.get("code") != "000000":
-                logger.error(f"presignedUrl failed: {data}")
-                local.unlink(missing_ok=True)
-                continue
-
-            presigned = data["data"]["presignedUrl"]
-            ticket = data["data"]["fileTicket"]
-            ctype = mimetypes.guess_type(str(local))[0] or "image/jpeg"
-
-            # 3) PUT 到 S3
-            try:
-                async with session.put(
-                    presigned,
-                    data=local.read_bytes(),
-                    headers={"Content-Type": ctype},
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as r:
-                    if r.status not in (200, 201):
-                        logger.error(f"S3 upload HTTP {r.status}")
-                        local.unlink(missing_ok=True)
-                        continue
-            except Exception as e:
-                logger.error(f"S3 upload error: {e}")
-                local.unlink(missing_ok=True)
-                continue
-
-            # 4) 轮询处理结果
-            image_url = None
-            for _ in range(12):
-                await asyncio.sleep(3)
-                st = await _api_post(
-                    session, API_V2, "/image/imageStatus", {"fileTicket": ticket}
-                )
-                if st.get("code") != "000000":
-                    continue
-                d = st.get("data") or {}
-                if d.get("status") == 1:
-                    image_url = d.get("imageUrl")
-                    break
-                if d.get("status") == 2:
-                    logger.error(f"Image process failed: {d.get('failedReason')}")
-                    break
-
-            local.unlink(missing_ok=True)
-
-            if image_url:
-                result.append(image_url)
-                logger.info(f"Image ready: {image_url}")
-            else:
-                logger.warning(f"Image upload timeout/fail for: {url}")
-
-    return result
+                logger.warning(f"下载图片失败: {e}")
+    return paths
 
 
-async def publish_to_square(
-    clean_text,
-    api_endpoint,
-    delay=10,
-    image_urls=None,
-    _retry_truncate=False,
-):
-    """发布到币安广场；image_urls 为推特图片直链列表（可选）。"""
+async def post_to_x(text: str, cookies_path: str, image_urls=None, video_urls=None) -> bool:
+    """
+    发到自己的 X：正文 + 图片。
+    video_urls 参数保留兼容，忽略不发。
+    """
+    image_urls = image_urls or []
+    # 明确不发视频
+    _ = video_urls
 
-    image_list = []
-    if image_urls and not _retry_truncate:
+    if not (text and str(text).strip()) and not image_urls:
+        return False
+    if not Path(cookies_path).exists():
+        logger.warning(f"未找到发帖 Cookie: {cookies_path}")
+        return False
+
+    ok, reason = acquire_x_post_slot()
+    if not ok:
+        logger.warning(f"跳过发 X: {reason}")
+        return False
+
+    t = (text or "").strip()
+    if len(t) > 280:
+        t = t[:277] + "..."
+
+    local_files = await _download_images(image_urls, max_n=4)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        await context.add_cookies(load_cookies(cookies_path))
+        page = await context.new_page()
         try:
-            image_list = await upload_tweet_images(image_urls)
-            logger.info(f"Uploaded images: {len(image_list)}/{len(image_urls or [])}")
+            await page.goto(
+                "https://x.com/compose/post",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            await asyncio.sleep(4)
+
+            if t:
+                editor = page.locator(
+                    '[data-testid="tweetTextarea_0"], div[role="textbox"]'
+                ).first
+                await editor.wait_for(state="visible", timeout=20000)
+                await editor.click()
+                await editor.fill(t)
+                await asyncio.sleep(1.5)
+
+            if local_files:
+                fi = page.locator(
+                    'input[data-testid="fileInput"], input[type="file"]'
+                ).first
+                if await fi.count() > 0:
+                    await fi.set_input_files(local_files)
+                    await asyncio.sleep(3 + len(local_files))
+
+            btn = page.locator(
+                '[data-testid="tweetButton"], [data-testid="tweetButtonInline"]'
+            ).first
+            await btn.click()
+            await asyncio.sleep(6)
+            logger.info("已发到自己的 X" + ("（含图）" if local_files else ""))
+            return True
         except Exception as e:
-            logger.error(f"Image upload failed, fallback text-only: {e}")
-
-    payload = {
-        "contentType": 1,
-        "bodyTextOnly": clean_text,
-    }
-    if image_list:
-        payload["imageList"] = image_list
-
-    # 下面保持你原来的 POST 与错误处理逻辑不变
-    # 注意：headers 建议带上 clienttype
-    headers = {
-        "X-Square-OpenAPI-Key": _get_api_key(),
-        "Content-Type": "application/json",
-        "clienttype": "binanceSkill",
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                api_endpoint,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=45),
-            ) as resp:
-                data = await resp.json()
-
-        code = str(data.get("code", ""))
-        msg = data.get("message", "")
-
-        if code == "000000":
-            post_id = (data.get("data") or {}).get("id", "")
-            post_url = f"https://www.binance.com/square/post/{post_id}" if post_id else ""
-            logger.info(f"Published to Square: {post_url}")
-            return True, {
-                "square_post_id": str(post_id),
-                "square_post_url": post_url,
-            }
-
-        result = {"error_code": code, "error_msg": msg}
-
-        if code == "220009":
-            result["halt_today"] = True
-            return False, result
-        if code in ("220003", "220004"):
-            result["halt_permanent"] = True
-            return False, result
-        if code in ("20002", "20022"):
-            result["skip_permanent"] = True
-            return False, result
-
-        # 内容过长：截断后重试（不再带图，避免重复上传）
-        if code == "20013" and not _retry_truncate:
-            truncated = clean_text[:800].rstrip() + "..."
-            await asyncio.sleep(delay)
-            return await publish_to_square(
-                truncated, api_endpoint, delay,
-                image_urls=None, _retry_truncate=True,
-            )
-
-        # 图片日上传上限：降级为纯文字
-        if code == "220014":
-            logger.warning("Image daily limit, retry text-only")
-            await asyncio.sleep(delay)
-            return await publish_to_square(
-                clean_text, api_endpoint, delay,
-                image_urls=None, _retry_truncate=True,
-            )
-
-        logger.error(f"Square API error: {code} {msg}")
-        return False, result
-
-    except Exception as e:
-        logger.error(f"Square publish exception: {e}")
-        return False, {"error_code": "exception", "error_msg": str(e)}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                api_endpoint, headers=headers, json=payload,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                data = await resp.json()
-
-        code = data.get("code", "")
-        msg = data.get("message", "")
-
-        if code == "000000":
-            post_id = data.get("data", {}).get("id", "")
-            post_url = f"https://www.binance.com/square/post/{post_id}" if post_id else ""
-            logger.info(f"Published to Square: {post_url}")
-            return True, {
-                "square_post_id": str(post_id),
-                "square_post_url": post_url,
-            }
-
-        # Error handling
-        result = {"error_code": str(code), "error_msg": msg}
-
-        if code in ("220009",):
-            # Daily limit exceeded
-            logger.warning(f"Square daily limit reached: {code} {msg}")
-            result["halt_today"] = True
-            return False, result
-
-        if code in ("220003", "220004"):
-            # API key invalid
-            logger.error(f"Square API key error: {code} {msg}")
-            result["halt_permanent"] = True
-            return False, result
-
-        if code in ("20002", "20022"):
-            # Sensitive content
-            logger.warning(f"Square sensitive content rejection: {code} {msg}")
-            result["skip_permanent"] = True
-            return False, result
-
-        if code == "20013" and not _retry_truncate:
-            # Content too long -- truncate and retry once (no further recursion)
-            logger.warning("Square content too long, truncating and retrying")
-            truncated = clean_text[:800].rstrip() + "..."
-            await asyncio.sleep(delay)
-            return await publish_to_square(truncated, api_endpoint, delay, _retry_truncate=True)
-
-        # Other errors
-        logger.error(f"Square API error: {code} {msg}")
-        return False, result
-
-    except Exception as e:
-        logger.error(f"Square publish exception: {e}")
-        return False, {"error_code": "exception", "error_msg": str(e)}
+            logger.error(f"发到自己的 X 失败: {e}")
+            return False
+        finally:
+            await browser.close()
+            for pth in local_files:
+                try:
+                    Path(pth).unlink(missing_ok=True)
+                except Exception:
+                    pass
