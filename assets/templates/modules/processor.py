@@ -8,7 +8,13 @@ URL_PATTERN = re.compile(
     r"(https?://\S+)|(www\.\S+)|(t\.co/\S+)|(pic\.twitter\.com/\S+)",
     re.IGNORECASE,
 )
+# $BTC、$Metis、$Pha 等
 CASHTAG_PATTERN = re.compile(r"\$([A-Za-z][A-Za-z0-9_]{0,30})")
+# 若误出现合约串，尽量清掉（无法还原代币名时仅删除）
+CONTRACT_PATTERN = re.compile(
+    r"\b(?:ethereum|eth|bsc|arb|arbitrum|polygon|solana|base):0x[a-fA-F0-9]{40}\b",
+    re.IGNORECASE,
+)
 
 
 def is_mostly_english(text: str) -> bool:
@@ -30,8 +36,40 @@ def strip_urls(text: str) -> str:
     return text.strip()
 
 
-def protect_cashtags(text: str) -> str:
-    """$TOKEN → ＄TOKEN，降低币安展开成合约地址的概率。"""
+def strip_contract_addresses(text: str) -> str:
+    """去掉 ethereum:0x... 这类合约串，避免出现在发帖正文。"""
+    if not text:
+        return text
+    text = CONTRACT_PATTERN.sub("", text)
+    text = re.sub(r"[^\S\n]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def mask_cashtags(text: str):
+    """翻译前保护 $TOKEN，避免被翻译引擎改写。"""
+    tags = []
+
+    def repl(m):
+        tags.append(m.group(0))  # 保留原始 $TOKEN
+        return f"⟦C{len(tags) - 1}⟧"
+
+    return CASHTAG_PATTERN.sub(repl, text), tags
+
+
+def unmask_cashtags(text: str, tags: list) -> str:
+    if not text:
+        return text
+    for i, tag in enumerate(tags):
+        text = text.replace(f"⟦C{i}⟧", tag)
+        # 容错：翻译可能改掉括号
+        text = text.replace(f"[C{i}]", tag)
+        text = text.replace(f"(C{i})", tag)
+    return text
+
+
+def protect_cashtags_for_square(text: str) -> str:
+    """发币安：ASCII $ → 全角 ＄，降低展开为合约的概率。"""
     if not text:
         return text
     return CASHTAG_PATTERN.sub(r"＄\1", text)
@@ -44,6 +82,7 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
     if not api_key:
         logger.warning("未配置 DEEPL_API_KEY，跳过翻译")
         return text
+
     base = (
         "https://api-free.deepl.com/v2/translate"
         if api_key.endswith(":fx")
@@ -54,6 +93,7 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
         "Content-Type": "application/json",
     }
     payload = {"text": [text[:4500]], "source_lang": "EN", "target_lang": "ZH"}
+
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(base, headers=headers, json=payload, timeout=15)
@@ -70,21 +110,30 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
         except Exception as e:
             logger.warning(f"DeepL 第 {attempt} 次尝试失败: {e}")
             time.sleep(2 ** attempt)
+
     logger.warning("翻译失败，保留原文")
     return text
 
 
-def process_tweet(raw_text, max_length=900, translate=True, for_square=True):
+def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
     """
-    去链接、可选翻译、保护 cashtag、截断。
-    for_square=True：发广场/需防合约展开时使用。
+    采集发自己的 X：for_square=False → 保留 $TOKEN
+    需要广场文案时再单独 protect_cashtags_for_square
     """
     text = strip_urls(raw_text or "")
+    text = strip_contract_addresses(text)
+
+    tags = []
     if translate and is_mostly_english(text):
+        text, tags = mask_cashtags(text)
         text = translate_to_chinese(text)
-    text = strip_urls(text)
+        text = unmask_cashtags(text, tags)
+        text = strip_urls(text)
+        text = strip_contract_addresses(text)
+
     if for_square:
-        text = protect_cashtags(text)
+        text = protect_cashtags_for_square(text)
+
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
         logger.warning("正文超长，已截断")
@@ -92,12 +141,11 @@ def process_tweet(raw_text, max_length=900, translate=True, for_square=True):
 
 
 def clean_for_distribute(raw_text, max_length=900, for_square=False):
-    """
-    主号分发：不翻译，只去 t.co/链接；发广场时再保护 cashtag。
-    """
+    """主号分发：不翻译；去链接/合约串；广场再保护 cashtag。"""
     text = strip_urls(raw_text or "")
+    text = strip_contract_addresses(text)
     if for_square:
-        text = protect_cashtags(text)
+        text = protect_cashtags_for_square(text)
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
     return text
