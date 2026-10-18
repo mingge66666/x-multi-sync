@@ -30,16 +30,14 @@ PROMO_KEYWORDS = [
     "click the link", "link in bio", "check my", "retweet and",
     "like and rt", "tag your friends",
     "折扣", "优惠", "名额", "仅剩", "终身访问", "私信", "详询",
-    "随波逐流", "大玩家", "只需要", "仅需",
+    "免费", "白嫖", "只需要", "仅需",
     "报名", "加微信", "加v", "代理", "招生", "课程", "社群收费",
 ]
 
 OFFTOPIC_KEYWORDS = [
     "happy birthday", "celebrating my", "enjoying life",
     "wedding", "vacation", "holiday",
-    "大姨妈", "干着急", "流量", "周期性", "你们也是",
-    "我的 x", "我的x", "心情", "感受", "好累", "失眠",
-    "今天吃了", "打卡", "自拍",
+    "流量", "运营X", "流量", "我的 x", "我的x",  "粉丝", "X上", "互动", "创作者",   
 ]
 
 
