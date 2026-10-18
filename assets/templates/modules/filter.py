@@ -1,6 +1,6 @@
 import re
 from modules import db
-from modules.processor import process_tweet
+from modules.processor import process_tweet, clean_for_distribute
 from loguru import logger
 
 PERSONAL_LINK_PATTERNS = [
@@ -82,16 +82,43 @@ def get_image_urls(tweet, max_images=4):
     return urls
 
 
+def _remove_entity_urls(text: str, tweet) -> str:
+    """按 entities 删除 full_text 中的 t.co / 媒体占位 / 外链。"""
+    if not text:
+        return ""
+    legacy = tweet.get("legacy", {}) or {}
+    entities = legacy.get("entities") or {}
+    ext = legacy.get("extended_entities") or {}
+    candidates = []
+    for m in (ext.get("media") or entities.get("media") or []):
+        for k in ("url", "display_url", "expanded_url", "media_url", "media_url_https"):
+            v = m.get(k)
+            if v:
+                candidates.append(v)
+    for u in entities.get("urls") or []:
+        for k in ("url", "display_url", "expanded_url"):
+            v = u.get(k)
+            if v:
+                candidates.append(v)
+    for v in sorted(set(candidates), key=len, reverse=True):
+        text = text.replace(v, "")
+        if "://" not in v:
+            text = text.replace("https://" + v, "").replace("http://" + v, "")
+    return text
+
+
 def get_tweet_text(tweet):
-    legacy = tweet.get("legacy", {})
-    return legacy.get("full_text", "") or tweet.get("text", "")
+    legacy = tweet.get("legacy", {}) or {}
+    text = legacy.get("full_text", "") or tweet.get("text", "") or ""
+    text = _remove_entity_urls(text, tweet)
+    return text.strip()
 
 
 def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=True):
     """
-    F-00 去重 | F-01 视频 | F-02 转推 | F-03 回复 | F-04 串帖
-    F-05 纯图 | F-06 空内容 | F-07 引流 | F-08 非行情
-    strict_promo=False：主号分发，正文保持与 X 一致，不做引流过滤、不翻译。
+    strict_promo=True  采集：翻译+过滤引流 + 去链 + 保护 cashtag
+    strict_promo=False 分发：不翻译，去 t.co，content_clean 供 TG；
+                       另存 content_square 供广场（带 ＄ 保护）
     """
     tweet_id = tweet.get("rest_id", "") or tweet.get("id_str", "")
     legacy = tweet.get("legacy", {})
@@ -132,8 +159,9 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         return False, "drop_thread", tweet_data
 
     if strict_promo:
-        # 采集阶段：翻译+清理，并过滤引流/非行情
-        clean_text = process_tweet(raw_text, max_length=max_content_length)
+        clean_text = process_tweet(
+            raw_text, max_length=max_content_length, translate=True, for_square=True
+        )
         if "photo" in media_types and not clean_text.strip():
             logger.debug(f"F-05 跳过纯图无文字: {tweet_id}")
             return False, "drop_image_only", tweet_data
@@ -146,19 +174,19 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         if has_promo_or_offtopic(raw_text) or has_promo_or_offtopic(clean_text):
             logger.info(f"F-08 跳过推广/非行情: {tweet_id}")
             return False, "drop_offtopic", tweet_data
-else:
-    # 主号分发：去掉推文末尾的 t.co 媒体链接，其它尽量与 X 一致
-    clean_text = re.sub(r"https?://\S+", "", raw_text or "")
-    clean_text = re.sub(r"[^\S\n]+", " ", clean_text)
-    clean_text = re.sub(r"\n{3,}", "\n\n", clean_text).strip()
-    if len(clean_text) > max_content_length:
-        clean_text = clean_text[: max_content_length - 3] + "..."
-    if not clean_text.strip() and "photo" not in media_types:
-        logger.debug(f"F-06 跳过空内容: {tweet_id}")
-        return False, "drop_empty", tweet_data
+        tweet_data["content_clean"] = clean_text
+        tweet_data["content_square"] = clean_text
+    else:
+        # 分发：去链接；TG 用无 ＄ 也可，广场必须保护 cashtag
+        text_tg = clean_for_distribute(raw_text, max_length=max_content_length, for_square=False)
+        text_sq = clean_for_distribute(raw_text, max_length=max_content_length, for_square=True)
+        if not text_tg.strip() and "photo" not in media_types:
+            logger.debug(f"F-06 跳过空内容: {tweet_id}")
+            return False, "drop_empty", tweet_data
+        tweet_data["content_clean"] = text_tg
+        tweet_data["content_square"] = text_sq
 
-    tweet_data["content_clean"] = clean_text
     tweet_data["filter_result"] = "pass"
     tweet_data["status"] = "pending"
-    logger.info(f"推文 {tweet_id} 通过过滤: {clean_text[:80]}...")
+    logger.info(f"推文 {tweet_id} 通过过滤: {tweet_data['content_clean'][:80]}...")
     return True, "pass", tweet_data
