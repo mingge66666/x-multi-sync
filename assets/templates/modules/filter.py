@@ -30,14 +30,13 @@ PROMO_KEYWORDS = [
     "click the link", "link in bio", "check my", "retweet and",
     "like and rt", "tag your friends",
     "折扣", "优惠", "名额", "仅剩", "蓝V", "私信", "详询",
-    "免费", "白嫖", "只需要", "仅需", "注册",
     "报名", "加微信", "加v", "代理", "招生", "课程", "社群收费",
 ]
 
 OFFTOPIC_KEYWORDS = [
     "happy birthday", "celebrating my", "enjoying life",
     "wedding", "vacation", "holiday",
-    "流量", "运营X", "流量", "我的 x", "我的x",  "粉丝", "X上", "互动", "创作者",   
+    "流量", "运营x", "我的 x", "我的x", "粉丝", "x上", "互动", 
 ]
 
 
@@ -62,7 +61,6 @@ def get_media_types(tweet):
 
 
 def get_image_urls(tweet, max_images=4):
-    """仅照片直链（不含视频封面，因视频整帖不转发）。"""
     urls, seen = [], set()
     legacy = tweet.get("legacy", {})
     if legacy.get("extended_entities"):
@@ -124,9 +122,8 @@ def get_tweet_text(tweet):
 
 def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=True):
     """
-    strict_promo=True  采集→自己的 X：
-      视频/GIF 不发 | 纯文字不发 | 推广/情绪不发 | 保留 $TOKEN
-    strict_promo=False 分发→广场/TG：同步主号已发内容（去链；广场 ＄）
+    采集→X：content_clean = 保留大小写的 $Token
+    分发→广场/TG：content_clean = content_square = $TOKEN 大写
     """
     tweet_id = tweet.get("rest_id", "") or tweet.get("id_str", "")
     legacy = tweet.get("legacy", {})
@@ -149,7 +146,6 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         logger.debug(f"F-00 去重跳过: {tweet_id}")
         return False, "dedup", tweet_data
 
-    # 统一：视频 / GIF 整帖不转发（采集与分发一致）
     if has_video:
         logger.info(f"F-01 跳过视频/GIF: {tweet_id}")
         return False, "drop_video", tweet_data
@@ -171,7 +167,6 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         return False, "drop_thread", tweet_data
 
     if strict_promo:
-        # 纯文字不发（必须有图）
         if not has_photo:
             logger.info(f"F-05 跳过纯文字: {tweet_id}")
             return False, "drop_text_only", tweet_data
@@ -195,20 +190,16 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
             return False, "drop_promo_or_personal", tweet_data
 
         tweet_data["content_clean"] = clean_text
+        # 若以后从采集直发广场，可用大写版
         tweet_data["content_square"] = protect_cashtags_for_square(clean_text)
     else:
-        # 分发：主号时间线；无视频（上面已丢）；可有图
-        text_tg = clean_for_distribute(
-            raw_text, max_length=max_content_length, for_square=False
-        )
-        text_sq = clean_for_distribute(
-            raw_text, max_length=max_content_length, for_square=True
-        )
-        if not text_tg.strip() and not has_photo:
+        # 分发：广场与 TG 同一套「$大写 + 空格」
+        body = clean_for_distribute(raw_text, max_length=max_content_length)
+        if not body.strip() and not has_photo:
             logger.debug(f"F-06 跳过空内容: {tweet_id}")
             return False, "drop_empty", tweet_data
-        tweet_data["content_clean"] = text_tg
-        tweet_data["content_square"] = text_sq
+        tweet_data["content_clean"] = body
+        tweet_data["content_square"] = body
 
     tweet_data["filter_result"] = "pass"
     tweet_data["status"] = "pending"
