@@ -8,9 +8,8 @@ URL_PATTERN = re.compile(
     r"(https?://\S+)|(www\.\S+)|(t\.co/\S+)|(pic\.twitter\.com/\S+)",
     re.IGNORECASE,
 )
-# $BTC、$Metis、$Pha 等
+# 匹配 $BTC、$Metis、$Axl 等（半角 $ 紧跟字母）
 CASHTAG_PATTERN = re.compile(r"\$([A-Za-z][A-Za-z0-9_]{0,30})")
-# 若误出现合约串，尽量清掉（无法还原代币名时仅删除）
 CONTRACT_PATTERN = re.compile(
     r"\b(?:ethereum|eth|bsc|arb|arbitrum|polygon|solana|base):0x[a-fA-F0-9]{40}\b",
     re.IGNORECASE,
@@ -37,7 +36,6 @@ def strip_urls(text: str) -> str:
 
 
 def strip_contract_addresses(text: str) -> str:
-    """去掉 ethereum:0x... 这类合约串，避免出现在发帖正文。"""
     if not text:
         return text
     text = CONTRACT_PATTERN.sub("", text)
@@ -46,12 +44,29 @@ def strip_contract_addresses(text: str) -> str:
     return text.strip()
 
 
+def normalize_cashtags(text: str) -> str:
+    """
+    确保 $TOKEN 后面有空格（如果后面紧跟中文/字母/数字）。
+    例：$Metis已触底 → $Metis 已触底
+    """
+    if not text:
+        return text
+
+    def repl(m):
+        tag = m.group(0)          # $Metis
+        end = m.end()
+        if end < len(text) and text[end] not in " \n\t.,;:!?，。；：！？":
+            return tag + " "
+        return tag
+
+    return CASHTAG_PATTERN.sub(repl, text)
+
+
 def mask_cashtags(text: str):
-    """翻译前保护 $TOKEN，避免被翻译引擎改写。"""
     tags = []
 
     def repl(m):
-        tags.append(m.group(0))  # 保留原始 $TOKEN
+        tags.append(m.group(0))
         return f"⟦C{len(tags) - 1}⟧"
 
     return CASHTAG_PATTERN.sub(repl, text), tags
@@ -62,17 +77,9 @@ def unmask_cashtags(text: str, tags: list) -> str:
         return text
     for i, tag in enumerate(tags):
         text = text.replace(f"⟦C{i}⟧", tag)
-        # 容错：翻译可能改掉括号
         text = text.replace(f"[C{i}]", tag)
         text = text.replace(f"(C{i})", tag)
     return text
-
-
-def protect_cashtags_for_square(text: str) -> str:
-    """发币安：ASCII $ → 全角 ＄，降低展开为合约的概率。"""
-    if not text:
-        return text
-    return CASHTAG_PATTERN.sub(r"＄\1", text)
 
 
 def translate_to_chinese(text: str, max_retries: int = 3) -> str:
@@ -116,10 +123,6 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
 
 
 def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
-    """
-    采集发自己的 X：for_square=False → 保留 $TOKEN
-    需要广场文案时再单独 protect_cashtags_for_square
-    """
     text = strip_urls(raw_text or "")
     text = strip_contract_addresses(text)
 
@@ -131,8 +134,8 @@ def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
         text = strip_urls(text)
         text = strip_contract_addresses(text)
 
-    if for_square:
-        text = protect_cashtags_for_square(text)
+    # 不再做全角转换，统一规范化 cashtag（补空格）
+    text = normalize_cashtags(text)
 
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
@@ -141,11 +144,10 @@ def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
 
 
 def clean_for_distribute(raw_text, max_length=900, for_square=False):
-    """主号分发：不翻译；去链接/合约串；广场再保护 cashtag。"""
+    """主号分发：不翻译，不去全角，只做清理 + 规范化 cashtag。"""
     text = strip_urls(raw_text or "")
     text = strip_contract_addresses(text)
-    if for_square:
-        text = protect_cashtags_for_square(text)
+    text = normalize_cashtags(text)   # 关键：保留 $ 并保证后面有空格
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
     return text
