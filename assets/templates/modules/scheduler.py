@@ -55,7 +55,7 @@ def max_age_hours(config) -> float:
 
 
 async def collect_from_account(config, username: str, stats: dict):
-    """从单个监控号采集：过滤 → 中文 → 发到自己的 X。"""
+    """从单个监控号采集：过滤 → 中文 → 发到自己的 X（图文；无视频/纯文字/推广）。"""
     logger.info(f"—— 开始采集监控号 @{username} ——")
     last_id = db.get_sync_state(cursor_key(username))
     raw, auth_error = await fetcher.fetch_tweets(config, username=username)
@@ -135,7 +135,7 @@ async def collect_from_account(config, username: str, stats: dict):
 
 
 async def distribute_from_my_x(config, stats: dict):
-    """从自己的 X 同步到币安广场 + Telegram（仅原创、近 N 小时）。"""
+    """从自己的 X 同步到币安广场 + Telegram（近 N 小时；$TOKEN 大写）。"""
     my = config.get("my_x") or {}
     username = (my.get("username") or "").lstrip("@")
     if not username:
@@ -201,11 +201,16 @@ async def distribute_from_my_x(config, stats: dict):
     for data in batch:
         db.save_tweet(data)
 
-        text_tg = data.get("content_clean") or data.get("content_raw") or ""
-        text_square = data.get("content_square") or text_tg   # 不再替换 $
+        # 广场与 TG 同一正文：$METIS 大写 + 空格（由 filter/processor 生成）
+        text_body = (
+            data.get("content_square")
+            or data.get("content_clean")
+            or data.get("content_raw")
+            or ""
+        )
 
         success, result = await publisher.publish_to_square(
-            text_square,
+            text_body,
             api,
             delay,
             image_urls=data.get("image_urls") or [],
@@ -221,7 +226,7 @@ async def distribute_from_my_x(config, stats: dict):
             stats["distributed"] = stats.get("distributed", 0) + 1
             try:
                 await telegram_sync.send_sync_post(
-                    text_tg,
+                    text_body,
                     square_url="",
                     image_urls=data.get("image_urls") or [],
                 )
