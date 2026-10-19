@@ -201,9 +201,8 @@ async def distribute_from_my_x(config, stats: dict):
     for data in batch:
         db.save_tweet(data)
 
-        # TG：去链接后的正文；广场：去链接 + ＄ 保护 cashtag
         text_tg = data.get("content_clean") or data.get("content_raw") or ""
-        text_square = data.get("content_square") or text_tg.replace("$", "＄")
+        text_square = data.get("content_square") or text_tg   # 不再替换 $
 
         success, result = await publisher.publish_to_square(
             text_square,
