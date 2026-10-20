@@ -30,7 +30,7 @@ PROMO_KEYWORDS = [
     "click the link", "link in bio", "check my", "retweet and",
     "like and rt", "tag your friends",
     "折扣", "优惠", "名额", "仅剩", "蓝V", "蓝 V", "创作者", "私信", "详询", "联系",
-    "报名", "加微信", "加v", "代理", "招生", "推送", "社群收费",
+    "报名", "加微信", "加v", "代理", "招生", "推送", "社群收费", "下单", "传送门",
 ]
 
 OFFTOPIC_KEYWORDS = [
