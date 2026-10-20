@@ -8,8 +8,9 @@ URL_PATTERN = re.compile(
     r"(https?://\S+)|(www\.\S+)|(t\.co/\S+)|(pic\.twitter\.com/\S+)",
     re.IGNORECASE,
 )
-# 半角或全角 $ + 代币名
-CASHTAG_PATTERN = re.compile(r"[＄$]([A-Za-z][A-Za-z0-9_]{0,30})")
+CASHTAG_PATTERN = re.compile(r"[＄$]\s*([A-Za-z][A-Za-z0-9_]{0,30})")
+PLACEHOLDER_FMT = "__CASHTAG{0}__"
+PLACEHOLDER_FIND = re.compile(r"__CASHTAG(\d+)__", re.IGNORECASE)
 CONTRACT_PATTERN = re.compile(
     r"\b(?:ethereum|eth|bsc|arb|arbitrum|polygon|solana|base):0x[a-fA-F0-9]{40}\b",
     re.IGNORECASE,
@@ -44,17 +45,24 @@ def strip_contract_addresses(text: str) -> str:
     return text.strip()
 
 
+def text_has_cashtag(text: str, name: str) -> bool:
+    if not text or not name:
+        return False
+    return (
+        re.search(rf"[＄$]\s*{re.escape(name)}\b", text, re.IGNORECASE) is not None
+    )
+
+
+def extract_cashtag_names(text: str) -> list:
+    if not text:
+        return []
+    return [m.group(1) for m in CASHTAG_PATTERN.finditer(text.replace("＄", "$"))]
+
+
 def normalize_cashtags(text: str, uppercase: bool = False) -> str:
-    """
-    统一 cashtag：
-    - 全角 ＄ → 半角 $
-    - 格式：$Name + 空格（后接中文等时尤其需要）
-    - uppercase=True（币安/TG）：$METIS 、$AXL
-    - uppercase=False（自己的 X）：保留原大小写 $Metis
-    """
+    """半角 $；uppercase 时 $METIS ；名称后补空格。"""
     if not text:
         return text
-
     text = text.replace("＄", "$")
 
     def repl(m: re.Match) -> str:
@@ -64,11 +72,41 @@ def normalize_cashtags(text: str, uppercase: bool = False) -> str:
         return f"${name} "
 
     text = CASHTAG_PATTERN.sub(repl, text)
-    # $TOKEN 后多空格压成一个
     text = re.sub(r"\$([A-Za-z][A-Za-z0-9_]{0,30})[ \t]+", r"$\1 ", text)
     text = re.sub(r"[^\S\n]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def ensure_cashtags_present(text: str, names: list, uppercase: bool = False) -> str:
+    """
+    names: ["Metis"] / ["$Metis"]
+    正文缺少对应 $TOKEN 时补到文首。
+    """
+    text = text or ""
+    missing = []
+    for raw in names or []:
+        name = (raw or "").strip().lstrip("$＄").strip()
+        if not name:
+            continue
+        if text_has_cashtag(text, name):
+            continue
+        missing.append(name.upper() if uppercase else name)
+
+    if not missing:
+        return text
+
+    seen = set()
+    ordered = []
+    for n in missing:
+        k = n.lower()
+        if k not in seen:
+            seen.add(k)
+            ordered.append(n)
+
+    prefix = " ".join(f"${n}" for n in ordered) + " "
+    logger.warning(f"cashtag 缺失，已补回文首: {ordered}")
+    return (prefix + text).strip()
 
 
 def mask_cashtags(text: str):
@@ -77,23 +115,30 @@ def mask_cashtags(text: str):
     def repl(m):
         tag = "$" + m.group(1)
         tags.append(tag)
-        return f"⟦C{len(tags) - 1}⟧"
+        return PLACEHOLDER_FMT.format(len(tags) - 1)
 
     return CASHTAG_PATTERN.sub(repl, text), tags
 
 
 def unmask_cashtags(text: str, tags: list) -> str:
     if not text:
-        return text
+        text = ""
     for i, tag in enumerate(tags):
-        text = text.replace(f"⟦C{i}⟧", tag)
-        text = text.replace(f"[C{i}]", tag)
-        text = text.replace(f"(C{i})", tag)
-    return text
+        ph = PLACEHOLDER_FMT.format(i)
+        text = text.replace(ph, tag)
+        text = re.sub(re.escape(ph), tag, text, flags=re.IGNORECASE)
+
+    def ph_repl(m):
+        i = int(m.group(1))
+        if 0 <= i < len(tags):
+            return tags[i]
+        return m.group(0)
+
+    return PLACEHOLDER_FIND.sub(ph_repl, text)
 
 
 def protect_cashtags_for_square(text: str) -> str:
-    """币安/TG：大写代币名 + 空格。"""
+    """广场/TG：大写 $TOKEN + 空格。"""
     return normalize_cashtags(text or "", uppercase=True)
 
 
@@ -138,20 +183,23 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
 
 
 def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
-    """
-    采集 → 自己的 X：uppercase=False，保留 $Metis 等形式。
-    """
+    """采集 → 自己的 X：保留大小写 $Metis 。"""
     text = strip_urls(raw_text or "")
     text = strip_contract_addresses(text)
 
+    tags = []
     if translate and is_mostly_english(text):
         text, tags = mask_cashtags(text)
         text = translate_to_chinese(text)
         text = unmask_cashtags(text, tags)
+        text = ensure_cashtags_present(text, tags, uppercase=False)
         text = strip_urls(text)
         text = strip_contract_addresses(text)
+    else:
+        tags = ["$" + n for n in extract_cashtag_names(text)]
 
     text = normalize_cashtags(text, uppercase=False)
+    text = ensure_cashtags_present(text, tags, uppercase=False)
 
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
@@ -159,16 +207,24 @@ def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
     return text
 
 
-def clean_for_distribute(raw_text, max_length=900, for_square=True):
+def clean_for_distribute(raw_text, max_length=900, for_square=True, extra_symbols=None):
     """
-    主号 → 币安 / TG：
-    默认 uppercase=True → $METIS 、$AXL
+    主号 → 广场 / TG：
+    - $METIS 大写 + 空格
+    - extra_symbols 来自 entities.symbols，防止丢失
     """
     text = strip_urls(raw_text or "")
     text = strip_contract_addresses(text)
-    text = normalize_cashtags(text, uppercase=bool(for_square) if for_square is not None else True)
-    # 分发场景统一大写（广场与 TG 相同）
+
+    names = extract_cashtag_names(text)
+    for s in extra_symbols or []:
+        s = (s or "").strip().lstrip("$＄")
+        if s:
+            names.append(s)
+
     text = normalize_cashtags(text, uppercase=True)
+    text = ensure_cashtags_present(text, names, uppercase=True)
+
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
     return text
