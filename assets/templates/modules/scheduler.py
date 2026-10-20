@@ -38,7 +38,6 @@ def cursor_key(name: str) -> str:
 
 
 def is_within_hours(tweet, hours=1.0) -> bool:
-    """推文是否在最近 hours 小时内发布。"""
     created_at = tweet.get("legacy", {}).get("created_at", "")
     if not created_at:
         return False
@@ -55,7 +54,6 @@ def max_age_hours(config) -> float:
 
 
 async def collect_from_account(config, username: str, stats: dict):
-    """从单个监控号采集：过滤 → 中文 → 发到自己的 X（图文；无视频/纯文字/推广）。"""
     logger.info(f"—— 开始采集监控号 @{username} ——")
     last_id = db.get_sync_state(cursor_key(username))
     raw, auth_error = await fetcher.fetch_tweets(config, username=username)
@@ -135,7 +133,6 @@ async def collect_from_account(config, username: str, stats: dict):
 
 
 async def distribute_from_my_x(config, stats: dict):
-    """从自己的 X 同步到币安广场 + Telegram（近 N 小时；$TOKEN 大写）。"""
     my = config.get("my_x") or {}
     username = (my.get("username") or "").lstrip("@")
     if not username:
@@ -201,13 +198,14 @@ async def distribute_from_my_x(config, stats: dict):
     for data in batch:
         db.save_tweet(data)
 
-        # 广场与 TG 同一正文：$METIS 大写 + 空格（由 filter/processor 生成）
+        # 广场与 TG 同一正文（$METIS 大写）；禁止改成全角 ＄
         text_body = (
             data.get("content_square")
             or data.get("content_clean")
             or data.get("content_raw")
             or ""
         )
+        logger.info(f"即将发广场/TG 正文: {text_body[:150]}...")
 
         success, result = await publisher.publish_to_square(
             text_body,
