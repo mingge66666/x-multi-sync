@@ -4,6 +4,7 @@ from modules.processor import (
     process_tweet,
     clean_for_distribute,
     protect_cashtags_for_square,
+    ensure_cashtags_present,
 )
 from loguru import logger
 
@@ -29,14 +30,15 @@ PROMO_KEYWORDS = [
     "dm me", "join my", "my channel", "my group", "my community",
     "click the link", "link in bio", "check my", "retweet and",
     "like and rt", "tag your friends",
-    "折扣", "优惠", "名额", "仅剩", "蓝V", "蓝 V", "创作者", "私信", "详询", "联系",
-    "报名", "加微信", "加v", "代理", "招生", "推送", "社群收费", "下单", "传送门",
+    "折扣", "优惠", "名额", "仅剩", "蓝V", "私信", "详询",
+    "免费", "白嫖", "只需要", "仅需", "注册",
+    "报名", "加微信", "加v", "代理", "招生", "课程", "社群收费",
 ]
 
 OFFTOPIC_KEYWORDS = [
     "happy birthday", "celebrating my", "enjoying life",
     "wedding", "vacation", "holiday",
-    "流量", "运营x", "我的 x", "我的x", "粉丝", "x上", "互动", "联系",
+    "流量", "运营x", "我的 x", "我的x", "粉丝", "x上", "互动", "创作者",
 ]
 
 
@@ -89,6 +91,18 @@ def get_image_urls(tweet, max_images=4):
     return urls
 
 
+def get_symbol_names(tweet) -> list:
+    """entities.symbols → ['Metis', 'Axl']，分发兜底用。"""
+    legacy = tweet.get("legacy", {}) or {}
+    symbols = (legacy.get("entities") or {}).get("symbols") or []
+    names = []
+    for s in symbols:
+        t = (s.get("text") or "").strip()
+        if t:
+            names.append(t)
+    return names
+
+
 def _remove_entity_urls(text: str, tweet) -> str:
     if not text:
         return ""
@@ -121,10 +135,6 @@ def get_tweet_text(tweet):
 
 
 def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=True):
-    """
-    采集→X：content_clean = 保留大小写的 $Token
-    分发→广场/TG：content_clean = content_square = $TOKEN 大写
-    """
     tweet_id = tweet.get("rest_id", "") or tweet.get("id_str", "")
     legacy = tweet.get("legacy", {})
     raw_text = get_tweet_text(tweet)
@@ -190,16 +200,24 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
             return False, "drop_promo_or_personal", tweet_data
 
         tweet_data["content_clean"] = clean_text
-        # 若以后从采集直发广场，可用大写版
         tweet_data["content_square"] = protect_cashtags_for_square(clean_text)
     else:
-        # 分发：广场与 TG 同一套「$大写 + 空格」
-        body = clean_for_distribute(raw_text, max_length=max_content_length)
+        # 分发：正文 + entities.symbols 兜底 → $METIS
+        symbols = get_symbol_names(tweet)
+        body = clean_for_distribute(
+            raw_text,
+            max_length=max_content_length,
+            extra_symbols=symbols,
+        )
+        body = ensure_cashtags_present(body, symbols, uppercase=True)
+
         if not body.strip() and not has_photo:
             logger.debug(f"F-06 跳过空内容: {tweet_id}")
             return False, "drop_empty", tweet_data
+
         tweet_data["content_clean"] = body
         tweet_data["content_square"] = body
+        logger.info(f"分发正文预览: {body[:120]}...")
 
     tweet_data["filter_result"] = "pass"
     tweet_data["status"] = "pending"
