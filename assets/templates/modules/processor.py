@@ -15,8 +15,6 @@ CONTRACT_PATTERN = re.compile(
     r"\b(?:ethereum|eth|bsc|arb|arbitrum|polygon|solana|base):0x[a-fA-F0-9]{40}\b",
     re.IGNORECASE,
 )
-
-
 def is_mostly_english(text: str) -> bool:
     if not text or not text.strip():
         return False
@@ -25,8 +23,6 @@ def is_mostly_english(text: str) -> bool:
         return False
     ascii_letters = sum(1 for c in text if "a" <= c.lower() <= "z")
     return (ascii_letters / letters) > 0.6
-
-
 def strip_urls(text: str) -> str:
     if not text:
         return ""
@@ -34,8 +30,6 @@ def strip_urls(text: str) -> str:
     text = re.sub(r"[^\S\n]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-
 def strip_contract_addresses(text: str) -> str:
     if not text:
         return text
@@ -43,24 +37,18 @@ def strip_contract_addresses(text: str) -> str:
     text = re.sub(r"[^\S\n]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-
 def text_has_cashtag(text: str, name: str) -> bool:
     if not text or not name:
         return False
     return (
-        re.search(rf"[＄$]\s*{re.escape(name)}\b", text, re.IGNORECASE) is not None
+        re.search(rf"[＄$]\s*{re.escape(name)}\b", text, flags=re.IGNORECASE)
+        is not None
     )
-
-
 def extract_cashtag_names(text: str) -> list:
     if not text:
         return []
     return [m.group(1) for m in CASHTAG_PATTERN.finditer(text.replace("＄", "$"))]
-
-
 def normalize_cashtags(text: str, uppercase: bool = False) -> str:
-    """半角 $；uppercase 时 $METIS ；名称后补空格。"""
     if not text:
         return text
     text = text.replace("＄", "$")
@@ -76,13 +64,8 @@ def normalize_cashtags(text: str, uppercase: bool = False) -> str:
     text = re.sub(r"[^\S\n]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-
 def ensure_cashtags_present(text: str, names: list, uppercase: bool = False) -> str:
-    """
-    names: ["Metis"] / ["$Metis"]
-    正文缺少对应 $TOKEN 时补到文首。
-    """
+    """正文缺少 $TOKEN 时补到文首。names 可为 Metis / $Metis。"""
     text = text or ""
     missing = []
     for raw in names or []:
@@ -107,8 +90,6 @@ def ensure_cashtags_present(text: str, names: list, uppercase: bool = False) -> 
     prefix = " ".join(f"${n}" for n in ordered) + " "
     logger.warning(f"cashtag 缺失，已补回文首: {ordered}")
     return (prefix + text).strip()
-
-
 def mask_cashtags(text: str):
     tags = []
 
@@ -118,8 +99,6 @@ def mask_cashtags(text: str):
         return PLACEHOLDER_FMT.format(len(tags) - 1)
 
     return CASHTAG_PATTERN.sub(repl, text), tags
-
-
 def unmask_cashtags(text: str, tags: list) -> str:
     if not text:
         text = ""
@@ -135,13 +114,8 @@ def unmask_cashtags(text: str, tags: list) -> str:
         return m.group(0)
 
     return PLACEHOLDER_FIND.sub(ph_repl, text)
-
-
 def protect_cashtags_for_square(text: str) -> str:
-    """广场/TG：大写 $TOKEN + 空格。"""
     return normalize_cashtags(text or "", uppercase=True)
-
-
 def translate_to_chinese(text: str, max_retries: int = 3) -> str:
     if not text or not text.strip():
         return text
@@ -180,10 +154,8 @@ def translate_to_chinese(text: str, max_retries: int = 3) -> str:
 
     logger.warning("翻译失败，保留原文")
     return text
-
-
 def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
-    """采集 → 自己的 X：保留大小写 $Metis 。"""
+    """采集 → X：保留大小写 $Metis。max_length 仅作软截断；硬性 280 在 filter 里拒绝。"""
     text = strip_urls(raw_text or "")
     text = strip_contract_addresses(text)
 
@@ -205,18 +177,16 @@ def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
         text = text[: max_length - 3].rstrip() + "..."
         logger.warning("正文超长，已截断")
     return text
-
-
 def clean_for_distribute(raw_text, max_length=900, for_square=True, extra_symbols=None):
     """
     主号 → 广场 / TG：
-    - $METIS 大写 + 空格
-    - extra_symbols 来自 entities.symbols，防止丢失
+    - 统一 $METIS（大写）+ 空格
+    - extra_symbols：entities.symbols，强制兜底
     """
     text = strip_urls(raw_text or "")
     text = strip_contract_addresses(text)
 
-    names = extract_cashtag_names(text)
+    names = list(extract_cashtag_names(text))
     for s in extra_symbols or []:
         s = (s or "").strip().lstrip("$＄")
         if s:
