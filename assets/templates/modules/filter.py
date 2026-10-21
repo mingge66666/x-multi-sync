@@ -8,6 +8,9 @@ from modules.processor import (
 )
 from loguru import logger
 
+# 普通 X 账号：严格小于 280 才发自己的 X
+X_FREE_MAX_CHARS = 280
+
 PERSONAL_LINK_PATTERNS = [
     r"(?i)t\.me/",
     r"(?i)telegram\.me/",
@@ -30,15 +33,15 @@ PROMO_KEYWORDS = [
     "dm me", "join my", "my channel", "my group", "my community",
     "click the link", "link in bio", "check my", "retweet and",
     "like and rt", "tag your friends",
-    "折扣", "优惠", "名额", "仅剩", "蓝V", "私信", "详询",
-    "免费", "白嫖", "只需要", "仅需", "注册",
+    "折扣", "优惠", "名额", "下单", "蓝V", "私信", "详询", "蓝 V", 
+    "传送门", "白嫖", "只需要", "仅需", "注册",
     "报名", "加微信", "加v", "代理", "招生", "课程", "社群收费",
 ]
 
 OFFTOPIC_KEYWORDS = [
     "happy birthday", "celebrating my", "enjoying life",
     "wedding", "vacation", "holiday",
-    "流量", "运营x", "我的 x", "我的x", "粉丝", "x上", "互动", "创作者",
+    "运营x", "我的 x", "我的x", "粉丝", "x上", "互动",
 ]
 
 
@@ -92,14 +95,35 @@ def get_image_urls(tweet, max_images=4):
 
 
 def get_symbol_names(tweet) -> list:
-    """entities.symbols → ['Metis', 'Axl']，分发兜底用。"""
-    legacy = tweet.get("legacy", {}) or {}
-    symbols = (legacy.get("entities") or {}).get("symbols") or []
+    """entities.symbols + 正文正则，尽量收齐代币名。"""
     names = []
-    for s in symbols:
+    seen = set()
+
+    legacy = tweet.get("legacy", {}) or {}
+    for s in (legacy.get("entities") or {}).get("symbols") or []:
         t = (s.get("text") or "").strip()
-        if t:
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
             names.append(t)
+
+    # note_tweet（若有）
+    note = (tweet.get("note_tweet") or {}).get("note_tweet_results") or {}
+    note_res = note.get("result") or {}
+    for s in (note_res.get("entity_set") or {}).get("symbols") or []:
+        t = (s.get("text") or "").strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            names.append(t)
+
+    raw = legacy.get("full_text") or ""
+    if note_res.get("text"):
+        raw = note_res.get("text") or raw
+    for m in re.finditer(r"[＄$]\s*([A-Za-z][A-Za-z0-9_]{0,30})", raw or ""):
+        t = m.group(1)
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            names.append(t)
+
     return names
 
 
@@ -130,6 +154,12 @@ def _remove_entity_urls(text: str, tweet) -> str:
 def get_tweet_text(tweet):
     legacy = tweet.get("legacy", {}) or {}
     text = legacy.get("full_text", "") or tweet.get("text", "") or ""
+
+    note = (tweet.get("note_tweet") or {}).get("note_tweet_results") or {}
+    note_res = note.get("result") or {}
+    if note_res.get("text"):
+        text = note_res.get("text") or text
+
     text = _remove_entity_urls(text, tweet)
     return text.strip()
 
@@ -177,6 +207,7 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         return False, "drop_thread", tweet_data
 
     if strict_promo:
+        # —— 采集 → 自己的 X ——
         if not has_photo:
             logger.info(f"F-05 跳过纯文字: {tweet_id}")
             return False, "drop_text_only", tweet_data
@@ -191,6 +222,13 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
             logger.debug(f"F-06 跳过空正文: {tweet_id}")
             return False, "drop_empty", tweet_data
 
+        # 关键：必须严格小于 280 字才发自己的 X（不截断凑合）
+        if len(clean_text) >= X_FREE_MAX_CHARS:
+            logger.info(
+                f"F-09 跳过超长帖({len(clean_text)}>={X_FREE_MAX_CHARS}): {tweet_id}"
+            )
+            return False, "drop_too_long", tweet_data
+
         if has_personal_link(raw_text):
             logger.info(f"F-07 跳过引流链接: {tweet_id}")
             return False, "drop_personal_link", tweet_data
@@ -202,7 +240,7 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
         tweet_data["content_clean"] = clean_text
         tweet_data["content_square"] = protect_cashtags_for_square(clean_text)
     else:
-        # 分发：正文 + entities.symbols 兜底 → $METIS
+        # —— 分发 → 广场 / TG：不改 900 上限；强制保留 $METIS ——
         symbols = get_symbol_names(tweet)
         body = clean_for_distribute(
             raw_text,
@@ -217,7 +255,9 @@ def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=Tru
 
         tweet_data["content_clean"] = body
         tweet_data["content_square"] = body
-        logger.info(f"分发正文预览: {body[:120]}...")
+        logger.info(
+            f"分发正文预览 id={tweet_id} symbols={symbols} body={body[:150]!r}"
+        )
 
     tweet_data["filter_result"] = "pass"
     tweet_data["status"] = "pending"
