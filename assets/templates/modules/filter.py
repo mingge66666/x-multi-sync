@@ -5,13 +5,19 @@ from modules.processor import (
     clean_for_distribute,
     protect_cashtags_for_square,
     ensure_cashtags_present,
+    binance_weighted_len,
+    truncate_by_binance_weight,
+    BINANCE_SQUARE_SAFE_WEIGHTED,
 )
 from loguru import logger
 
-# 普通 X 账号：加权长度严格 < 280 才走「发自己的 X」
+# 普通 X 账号：严格小于 280 才发自己的 X
 X_FREE_MAX_CHARS = 280
-# 币安广场短帖：实测约 2100 即提示超限（按字符数，汉字=3）
-BINANCE_SQUARE_MAX_CHARS = 2080
+
+# 币安广场加权上限（与 processor 一致）
+BINANCE_SQUARE_MAX_WEIGHTED = 2100
+# 安全余量，避免边界 20013
+# 不要再用 669：那只相当于约 223 个汉字，过短
 
 PERSONAL_LINK_PATTERNS = [
     r"(?i)t\.me/",
@@ -35,9 +41,9 @@ PROMO_KEYWORDS = [
     "dm me", "join my", "my channel", "my group", "my community",
     "click the link", "link in bio", "check my", "retweet and",
     "like and rt", "tag your friends",
-    "蓝V", "私信", "详询", "蓝 V",
-    "传送门", "注册",
-    "加微信", "加v", "社群收费",
+    "折扣", "优惠", "名额", "下单", "蓝V", "私信", "详询", "蓝 V",
+    "传送门", "白嫖", "只需要", "仅需", "注册",
+    "报名", "加微信", "加v", "代理", "招生", "课程", "社群收费",
 ]
 
 OFFTOPIC_KEYWORDS = [
@@ -45,25 +51,6 @@ OFFTOPIC_KEYWORDS = [
     "wedding", "vacation", "holiday",
     "运营x", "我的 x", "我的x", "粉丝", "x上", "互动",
 ]
-
-
-def x_weighted_length(text: str) -> int:
-    """
-    X 近似加权字数：
-    - 基本拉丁 / 数字 / 常见标点：1
-    - CJK、全角、emoji 等：2
-    （链接未单独按 23 计，足够用于路由判断）
-    """
-    if not text:
-        return 0
-    n = 0
-    for ch in text:
-        o = ord(ch)
-        if o <= 0x7F:
-            n += 1
-        else:
-            n += 2
-    return n
 
 
 def has_personal_link(text: str) -> bool:
@@ -184,19 +171,7 @@ def get_tweet_text(tweet):
     return text.strip()
 
 
-def filter_tweet(tweet, target_user_id, max_content_length=699, strict_promo=True):
-    """
-    返回:
-      (ok, result, tweet_data)
-
-    strict_promo=True（采集监控号）时：
-      tweet_data["route"] ∈ {"x", "square_tg"}
-      - x: 发自己的 X，再由 distribute_from_my_x 同步广场+TG
-      - square_tg: 不发 X，采集阶段直接发广场+TG
-
-    strict_promo=False（从自己的 X 分发）时：
-      仍只做正文清洗，供广场/TG 使用。
-    """
+def filter_tweet(tweet, target_user_id, max_content_length=900, strict_promo=True):
     tweet_id = tweet.get("rest_id", "") or tweet.get("id_str", "")
     legacy = tweet.get("legacy", {})
     raw_text = get_tweet_text(tweet)
@@ -212,7 +187,6 @@ def filter_tweet(tweet, target_user_id, max_content_length=699, strict_promo=Tru
         "tweet_type": "original",
         "image_urls": get_image_urls(tweet),
         "video_urls": [],
-        "route": "x",
     }
 
     if db.tweet_exists(tweet_id):
@@ -240,21 +214,27 @@ def filter_tweet(tweet, target_user_id, max_content_length=699, strict_promo=Tru
         return False, "drop_thread", tweet_data
 
     if strict_promo:
-        # —— 采集 → 自己的 X / 或直接广场+TG ——
+        # —— 采集 → 自己的 X ——
         if not has_photo:
             logger.info(f"F-05 跳过纯文字: {tweet_id}")
             return False, "drop_text_only", tweet_data
 
-        # 先按广场上限清洗，避免 process 时被错误截断影响路由
         clean_text = process_tweet(
             raw_text,
-            max_length=max(max_content_length, BINANCE_SQUARE_MAX_CHARS),
+            max_length=max_content_length,
             translate=True,
             for_square=False,
         )
         if not clean_text.strip():
             logger.debug(f"F-06 跳过空正文: {tweet_id}")
             return False, "drop_empty", tweet_data
+
+        # 关键：必须严格小于 280 字才发自己的 X（不截断凑合）
+        if len(clean_text) >= X_FREE_MAX_CHARS:
+            logger.info(
+                f"F-09 跳过超长帖({len(clean_text)}>={X_FREE_MAX_CHARS}): {tweet_id}"
+            )
+            return False, "drop_too_long", tweet_data
 
         if has_personal_link(raw_text):
             logger.info(f"F-07 跳过引流链接: {tweet_id}")
@@ -264,66 +244,40 @@ def filter_tweet(tweet, target_user_id, max_content_length=699, strict_promo=Tru
             logger.info(f"F-08 跳过推广/个人情绪: {tweet_id}")
             return False, "drop_promo_or_personal", tweet_data
 
-        x_len = x_weighted_length(clean_text)
-        square_len = len(clean_text)
-
-        # 超过广场短帖上限 → 跳过
-        if square_len > BINANCE_SQUARE_MAX_CHARS:
-            logger.info(
-                f"F-09 跳过超广场上限({square_len}>{BINANCE_SQUARE_MAX_CHARS}): {tweet_id}"
-            )
-            return False, "drop_too_long", tweet_data
-
-        # ≤ X 限制 → 发自己的 X
-        if x_len < X_FREE_MAX_CHARS:
-            route = "x"
-            logger.info(
-                f"路由=x id={tweet_id} x_len={x_len} square_len={square_len}"
-            )
-        else:
-            # X 超限但广场可发 → 直接广场+TG
-            route = "square_tg"
-            logger.info(
-                f"路由=square_tg id={tweet_id} x_len={x_len}>={X_FREE_MAX_CHARS} "
-                f"square_len={square_len}<={BINANCE_SQUARE_MAX_CHARS}"
-            )
-
-        tweet_data["route"] = route
         tweet_data["content_clean"] = clean_text
         tweet_data["content_square"] = protect_cashtags_for_square(clean_text)
-        tweet_data["x_weighted_len"] = x_len
-        tweet_data["square_len"] = square_len
     else:
-        # —— 分发 → 广场 / TG ——
+        # —— 分发 → 广场 / TG：按币安加权字符截断 ——
         symbols = get_symbol_names(tweet)
+        weighted_limit = int(max_content_length or BINANCE_SQUARE_SAFE_WEIGHTED)
+        if weighted_limit > BINANCE_SQUARE_SAFE_WEIGHTED:
+            weighted_limit = BINANCE_SQUARE_SAFE_WEIGHTED
+        if weighted_limit < 100:
+            weighted_limit = BINANCE_SQUARE_SAFE_WEIGHTED
+
         body = clean_for_distribute(
             raw_text,
-            max_length=min(max_content_length, BINANCE_SQUARE_MAX_CHARS),
+            max_length=weighted_limit,
             extra_symbols=symbols,
         )
         body = ensure_cashtags_present(body, symbols, uppercase=True)
+        body = truncate_by_binance_weight(body, max_weighted=weighted_limit)
 
         if not body.strip() and not has_photo:
             logger.debug(f"F-06 跳过空内容: {tweet_id}")
             return False, "drop_empty", tweet_data
 
-        if len(body) > BINANCE_SQUARE_MAX_CHARS:
-            logger.info(
-                f"F-09 分发超广场上限({len(body)}>{BINANCE_SQUARE_MAX_CHARS}): {tweet_id}"
-            )
-            return False, "drop_too_long", tweet_data
-
+        wlen = binance_weighted_len(body)
         tweet_data["content_clean"] = body
         tweet_data["content_square"] = body
-        tweet_data["route"] = "square_tg"
         logger.info(
-            f"分发正文预览 id={tweet_id} symbols={symbols} body={body[:150]!r}"
+            f"分发正文预览 id={tweet_id} symbols={symbols} "
+            f"chars={len(body)} weighted={wlen}/{weighted_limit} body={body[:150]!r}"
         )
 
     tweet_data["filter_result"] = "pass"
     tweet_data["status"] = "pending"
     logger.info(
-        f"推文 {tweet_id} 通过过滤 route={tweet_data.get('route')}: "
-        f"{(tweet_data.get('content_clean') or '')[:80]}..."
+        f"推文 {tweet_id} 通过过滤: {(tweet_data.get('content_clean') or '')[:80]}..."
     )
     return True, "pass", tweet_data
