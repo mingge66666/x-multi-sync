@@ -144,9 +144,9 @@ async def collect_from_account(config, username: str, stats: dict):
     target_uid = get_target_user_id(raw) or ""
     highest = last_id
     batch = []
-    # 采集阶段按广场上限 699 过滤
+    # 采集阶段按广场上限 2100 过滤
     max_len = int(
-        config.get("binance_square", {}).get("max_content_length", 699)
+        config.get("binance_square", {}).get("max_content_length", 2100)
     )
 
     for tweet in raw:
@@ -183,7 +183,7 @@ async def collect_from_account(config, username: str, stats: dict):
         route = data.get("route") or "x"
 
         if route == "square_tg":
-            # 超 X 限制、未超广场 699：不发 X，直接广场 + TG
+            # 超 X 限制、未超广场 2100：不发 X，直接广场 + TG
             ok = await _publish_square_and_tg(config, data, stats)
             if not ok and db.get_sync_state("halt_publishing_today") == "1":
                 break
