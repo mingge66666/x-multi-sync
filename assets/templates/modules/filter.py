@@ -35,9 +35,9 @@ PROMO_KEYWORDS = [
     "dm me", "join my", "my channel", "my group", "my community",
     "click the link", "link in bio", "check my", "retweet and",
     "like and rt", "tag your friends",
-    "折扣", "优惠", "名额", "下单", "蓝V", "私信", "详询", "蓝 V",
-    "传送门", "白嫖", "只需要", "仅需", "注册",
-    "报名", "加微信", "加v", "代理", "招生", "课程", "社群收费",
+    "蓝V", "私信", "详询", "蓝 V",
+    "传送门", "注册",
+    "加微信", "加v", "社群收费",
 ]
 
 OFFTOPIC_KEYWORDS = [
