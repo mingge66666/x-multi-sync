@@ -15,6 +15,11 @@ CONTRACT_PATTERN = re.compile(
     r"\b(?:ethereum|eth|bsc|arb|arbitrum|polygon|solana|base):0x[a-fA-F0-9]{40}\b",
     re.IGNORECASE,
 )
+
+# 币安广场：加权字符上限（1 汉字 ≈ 3，纯中文约 700）
+# 官方总上限约 2100；用 2080 留余量，降低 20013 概率
+BINANCE_SQUARE_MAX_WEIGHTED = 2100
+BINANCE_SQUARE_SAFE_WEIGHTED = 2080
 def is_mostly_english(text: str) -> bool:
     if not text or not text.strip():
         return False
@@ -23,6 +28,54 @@ def is_mostly_english(text: str) -> bool:
         return False
     ascii_letters = sum(1 for c in text if "a" <= c.lower() <= "z")
     return (ascii_letters / letters) > 0.6
+def is_cjk_char(ch: str) -> bool:
+    """是否按币安规则计为宽字符（汉字等，通常 ×3）。"""
+    if not ch:
+        return False
+    code = ord(ch)
+    return (
+        0x4E00 <= code <= 0x9FFF
+        or 0x3400 <= code <= 0x4DBF
+        or 0x20000 <= code <= 0x2A6DF
+        or 0x2A700 <= code <= 0x2B73F
+        or 0x2B740 <= code <= 0x2B81F
+        or 0x2B820 <= code <= 0x2CEAF
+        or 0xF900 <= code <= 0xFAFF
+        or 0xFF00 <= code <= 0xFFEF
+        or 0x3000 <= code <= 0x303F
+    )
+def binance_weighted_len(text: str) -> int:
+    """币安广场加权长度：汉字等宽字符计 3，其余计 1。"""
+    if not text:
+        return 0
+    total = 0
+    for ch in text:
+        total += 3 if is_cjk_char(ch) else 1
+    return total
+def truncate_by_binance_weight(
+    text: str, max_weighted: int = BINANCE_SQUARE_SAFE_WEIGHTED
+) -> str:
+    """按加权长度截断，在完整字符边界切断，末尾加 ..."""
+    if not text:
+        return ""
+    if binance_weighted_len(text) <= max_weighted:
+        return text
+
+    budget = max(0, int(max_weighted) - 3)  # 预留 "..." 的 3 个 ASCII
+    out = []
+    used = 0
+    for ch in text:
+        cost = 3 if is_cjk_char(ch) else 1
+        if used + cost > budget:
+            break
+        out.append(ch)
+        used += cost
+    result = "".join(out).rstrip() + "..."
+    logger.warning(
+        f"广场正文超加权上限，已截断: "
+        f"weighted={binance_weighted_len(text)} -> {binance_weighted_len(result)}"
+    )
+    return result
 def strip_urls(text: str) -> str:
     if not text:
         return ""
@@ -173,15 +226,20 @@ def process_tweet(raw_text, max_length=900, translate=True, for_square=False):
     text = normalize_cashtags(text, uppercase=False)
     text = ensure_cashtags_present(text, tags, uppercase=False)
 
+    if for_square:
+        limit = min(int(max_length or BINANCE_SQUARE_SAFE_WEIGHTED), BINANCE_SQUARE_SAFE_WEIGHTED)
+        return truncate_by_binance_weight(text, max_weighted=limit)
+
     if len(text) > max_length:
         text = text[: max_length - 3].rstrip() + "..."
         logger.warning("正文超长，已截断")
     return text
-def clean_for_distribute(raw_text, max_length=900, for_square=True, extra_symbols=None):
+def clean_for_distribute(raw_text, max_length=2100, for_square=True, extra_symbols=None):
     """
     主号 → 广场 / TG：
     - 统一 $METIS（大写）+ 空格
     - extra_symbols：entities.symbols，强制兜底
+    - max_length：按币安「加权字符」理解（默认安全上限 2080）
     """
     text = strip_urls(raw_text or "")
     text = strip_contract_addresses(text)
@@ -195,6 +253,6 @@ def clean_for_distribute(raw_text, max_length=900, for_square=True, extra_symbol
     text = normalize_cashtags(text, uppercase=True)
     text = ensure_cashtags_present(text, names, uppercase=True)
 
-    if len(text) > max_length:
-        text = text[: max_length - 3].rstrip() + "..."
+    limit = min(int(max_length or BINANCE_SQUARE_SAFE_WEIGHTED), BINANCE_SQUARE_SAFE_WEIGHTED)
+    text = truncate_by_binance_weight(text, max_weighted=limit)
     return text
