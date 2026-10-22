@@ -10,8 +10,8 @@ from loguru import logger
 
 # 普通 X 账号：加权长度严格 < 280 才走「发自己的 X」
 X_FREE_MAX_CHARS = 280
-# 币安广场短帖：实测约 699 即提示超限（按字符数，汉字=1）
-BINANCE_SQUARE_MAX_CHARS = 699
+# 币安广场短帖：实测约 2100 即提示超限（按字符数，汉字=3）
+BINANCE_SQUARE_MAX_CHARS = 2100
 
 PERSONAL_LINK_PATTERNS = [
     r"(?i)t\.me/",
