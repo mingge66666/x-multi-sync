@@ -12,7 +12,8 @@ my_x:
 binance_square:
   api_endpoint: "https://www.binance.com/bapi/composite/v1/public/pgc/openApi/content/add"
   inter_request_delay_seconds: 15
-  max_content_length: 900
+  # 按币安「加权字符」理解：上限约 2100（1汉字≈3）；代码内实际用 2080 安全值
+  max_content_length: 2100
 
 scheduler:
   interval_minutes: 20
@@ -20,7 +21,7 @@ scheduler:
   daily_digest_hour_utc8: 21
   midnight_reset_hour_utc8: 0
   per_account_delay_seconds: 20
-  max_tweet_age_hours: 1 
+  max_tweet_age_hours: 1
 
 limits:
   max_retries: 3
